@@ -26,19 +26,28 @@ nimgs = 10
 datetoday = date.today().strftime("%m_%d_%y")
 datetoday2 = date.today().strftime("%d-%B-%Y")
 
+# Base path for local resources
+script_dir = os.path.dirname(os.path.abspath(__file__))
+os.chdir(script_dir)
+
+
+def local(*parts):
+    return os.path.join(script_dir, *parts)
+
 
 # Initializing VideoCapture object to access WebCam
-face_detector = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
+face_detector = cv2.CascadeClassifier(
+    local('haarcascade_frontalface_default.xml'))
 
 # If these directories don't exist, create them
-if not os.path.isdir('Attendance'):
-    os.makedirs('Attendance')
-if not os.path.isdir('static'):
-    os.makedirs('static')
-if not os.path.isdir('static/faces'):
-    os.makedirs('static/faces')
+if not os.path.isdir(local('Attendance')):
+    os.makedirs(local('Attendance'))
+if not os.path.isdir(local('static')):
+    os.makedirs(local('static'))
+if not os.path.isdir(local('static', 'faces')):
+    os.makedirs(local('static', 'faces'))
 
-attendance_file = f'Attendance/Attendance-{datetoday}.csv'
+attendance_file = local('Attendance', f'Attendance-{datetoday}.csv')
 if not os.path.isfile(attendance_file) or os.stat(attendance_file).st_size == 0:
     with open(attendance_file, 'w') as f:
         f.write('Name,Roll,Time')
@@ -49,9 +58,11 @@ model = None
 
 def load_trained_model():
     global model
-    if os.path.isdir('static') and 'face_recognition_model.pkl' in os.listdir('static'):
+    static_dir = local('static')
+    model_file = local('static', 'face_recognition_model.pkl')
+    if os.path.isdir(static_dir) and os.path.isfile(model_file):
         try:
-            model = joblib.load('static/face_recognition_model.pkl')
+            model = joblib.load(model_file)
             logging.info("Model loaded successfully.")
         except Exception as e:
             logging.error(f"Error loading model: {e}")
@@ -60,15 +71,14 @@ def load_trained_model():
         logging.warning(
             "No face_recognition_model.pkl found in static folder.")
         model = None
-
-
-# Load model at startup
-load_trained_model()
+        if os.path.isdir(local('static', 'faces')) and os.listdir(local('static', 'faces')):
+            logging.info("Training model from existing face folders...")
+            train_model()
 
 
 # get a number of total registered users
 def totalreg():
-    return len(os.listdir('static/faces'))
+    return len(os.listdir(local('static', 'faces')))
 
 
 # extract the face from an image
@@ -88,7 +98,15 @@ def identify_face(facearray):
     if model is None:
         load_trained_model()
     if model:
-        return model.predict(facearray)
+        try:
+            distances, indices = model.named_steps['knn'].kneighbors(
+                facearray, n_neighbors=1)
+            if distances[0][0] > 1.5:  # Threshold for confidence
+                return ["Unknown"]
+            return model.predict(facearray)
+        except Exception as e:
+            logging.error(f"Error in identification: {e}")
+            return ["Unknown"]
     return ["Unknown"]
 
 
@@ -96,10 +114,10 @@ def identify_face(facearray):
 def train_model():
     faces = []
     labels = []
-    userlist = os.listdir('static/faces')
+    userlist = os.listdir(local('static', 'faces'))
     for user in userlist:
-        for imgname in os.listdir(f'static/faces/{user}'):
-            img = cv2.imread(f'static/faces/{user}/{imgname}')
+        for imgname in os.listdir(local('static', 'faces', user)):
+            img = cv2.imread(local('static', 'faces', user, imgname))
             if img is not None:
                 resized_face = cv2.resize(img, (50, 50))
                 faces.append(resized_face.ravel())
@@ -114,7 +132,7 @@ def train_model():
     # Determine safe number of components for PCA
     n_samples = faces.shape[0]
     n_features = faces.shape[1]
-    n_components = min(n_samples, n_features, 50)
+    n_components = min(n_samples, n_features, 100)
 
     logging.info(
         f"Training model with {n_samples} samples and PCA(n_components={n_components})")
@@ -123,14 +141,14 @@ def train_model():
     pipeline = Pipeline([
         ('scaler', StandardScaler()),
         ('pca', PCA(n_components=n_components)),
-        ('knn', KNeighborsClassifier(n_neighbors=5))
+        ('knn', KNeighborsClassifier(n_neighbors=1))
     ])
 
     pipeline.fit(faces, labels)
 
     # Save model with error handling
     try:
-        model_path = 'static/face_recognition_model.pkl'
+        model_path = local('static', 'face_recognition_model.pkl')
         joblib.dump(pipeline, model_path)
         logging.info(f"Model saved successfully at {model_path}")
     except Exception as e:
@@ -143,9 +161,13 @@ def train_model():
     logging.info("Model training completed and updated.")
 
 
+# Load model at startup
+load_trained_model()
+
+
 # Extract info from today's attendance file in attendance folder
 def extract_attendance():
-    attendance_file = f'Attendance/Attendance-{datetoday}.csv'
+    attendance_file = local('Attendance', f'Attendance-{datetoday}.csv')
     if not os.path.isfile(attendance_file) or os.stat(attendance_file).st_size == 0:
         with open(attendance_file, 'w') as f:
             f.write('Name,Roll,Time')
@@ -164,14 +186,14 @@ def add_attendance(name):
     userid = name.split('_')[1]
     current_time = datetime.now().strftime("%H:%M:%S")
 
-    attendance_file = f'Attendance/Attendance-{datetoday}.csv'
+    attendance_file = local('Attendance', f'Attendance-{datetoday}.csv')
     with open(attendance_file, 'a') as f:
         f.write(f'\n{username},{userid},{current_time}')
 
 
 # A function to get names and rol numbers of all users
 def getallusers():
-    userlist = os.listdir('static/faces')
+    userlist = os.listdir(local('static', 'faces'))
     names = []
     rolls = []
     l = len(userlist)
@@ -212,11 +234,13 @@ def listusers():
 @app.route('/deleteuser', methods=['GET'])
 def deleteuser():
     duser = request.args.get('user')
-    deletefolder('static/faces/'+duser)
+    deletefolder(local('static', 'faces', duser))
 
     # if all the face are deleted, delete the trained file...
-    if os.listdir('static/faces/') == []:
-        os.remove('static/face_recognition_model.pkl')
+    if os.listdir(local('static', 'faces')) == []:
+        model_file = local('static', 'face_recognition_model.pkl')
+        if os.path.isfile(model_file):
+            os.remove(model_file)
 
     try:
         train_model()
@@ -347,7 +371,7 @@ def start():
 def add():
     newusername = request.form['newusername']
     newuserid = request.form['newuserid']
-    userimagefolder = 'static/faces/'+newusername+'_'+str(newuserid)
+    userimagefolder = local('static', 'faces', newusername+'_'+str(newuserid))
     if not os.path.isdir(userimagefolder):
         os.makedirs(userimagefolder)
     i, j = 0, 0

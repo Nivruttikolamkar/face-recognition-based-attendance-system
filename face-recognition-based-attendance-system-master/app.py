@@ -26,22 +26,26 @@ nimgs = 10
 datetoday = date.today().strftime("%m_%d_%y")
 datetoday2 = date.today().strftime("%d-%B-%Y")
 
+# Base path for local resources
+script_dir = os.path.dirname(os.path.abspath(__file__))
+os.chdir(script_dir)
+
+
+def local(*parts):
+    return os.path.join(script_dir, *parts)
+
 
 # Initializing VideoCapture object to access WebCam
-face_detector = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
+face_detector = cv2.CascadeClassifier(
+    local('haarcascade_frontalface_default.xml'))
 
 # If these directories don't exist, create them
-if not os.path.isdir('Attendance'):
-    os.makedirs('Attendance')
-if not os.path.isdir('static'):
-    os.makedirs('static')
-if not os.path.isdir('static/faces'):
-    os.makedirs('static/faces')
-
-attendance_file = f'Attendance/Attendance-{datetoday}.csv'
-if not os.path.isfile(attendance_file) or os.stat(attendance_file).st_size == 0:
-    with open(attendance_file, 'w') as f:
-        f.write('Name,Roll,Time')
+if not os.path.isdir(local('Attendance')):
+    os.makedirs(local('Attendance'))
+if not os.path.isdir(local('static')):
+    os.makedirs(local('static'))
+if not os.path.isdir(local('static', 'faces')):
+    os.makedirs(local('static', 'faces'))
 
 # Global model variable
 model = None
@@ -49,9 +53,11 @@ model = None
 
 def load_trained_model():
     global model
-    if os.path.isdir('static') and 'face_recognition_model.pkl' in os.listdir('static'):
+    static_dir = local('static')
+    model_file = local('static', 'face_recognition_model.pkl')
+    if os.path.isdir(static_dir) and os.path.isfile(model_file):
         try:
-            model = joblib.load('static/face_recognition_model.pkl')
+            model = joblib.load(model_file)
             logging.info("Model loaded successfully.")
         except Exception as e:
             logging.error(f"Error loading model: {e}")
@@ -60,15 +66,14 @@ def load_trained_model():
         logging.warning(
             "No face_recognition_model.pkl found in static folder.")
         model = None
-
-
-# Load model at startup
-load_trained_model()
+        if os.path.isdir(local('static', 'faces')) and os.listdir(local('static', 'faces')):
+            logging.info("Training model from existing face folders...")
+            train_model()
 
 
 # get a number of total registered users
 def totalreg():
-    return len(os.listdir('static/faces'))
+    return len(os.listdir(local('static', 'faces')))
 
 
 # extract the face from an image
@@ -96,10 +101,10 @@ def identify_face(facearray):
 def train_model():
     faces = []
     labels = []
-    userlist = os.listdir('static/faces')
+    userlist = os.listdir(local('static', 'faces'))
     for user in userlist:
-        for imgname in os.listdir(f'static/faces/{user}'):
-            img = cv2.imread(f'static/faces/{user}/{imgname}')
+        for imgname in os.listdir(local('static', 'faces', user)):
+            img = cv2.imread(local('static', 'faces', user, imgname))
             if img is not None:
                 resized_face = cv2.resize(img, (50, 50))
                 faces.append(resized_face.ravel())
@@ -130,7 +135,7 @@ def train_model():
 
     # Save model with error handling
     try:
-        model_path = 'static/face_recognition_model.pkl'
+        model_path = local('static', 'face_recognition_model.pkl')
         joblib.dump(pipeline, model_path)
         logging.info(f"Model saved successfully at {model_path}")
     except Exception as e:
@@ -143,19 +148,26 @@ def train_model():
     logging.info("Model training completed and updated.")
 
 
+# Load model at startup
+load_trained_model()
+
+
 # Extract info from today's attendance file in attendance folder
 def extract_attendance():
-    attendance_file = f'Attendance/Attendance-{datetoday}.csv'
-    if not os.path.isfile(attendance_file) or os.stat(attendance_file).st_size == 0:
-        with open(attendance_file, 'w') as f:
-            f.write('Name,Roll,Time')
+    attendance_file = local('Attendance', f'Attendance-{datetoday}.csv')
+    if not os.path.isfile(attendance_file):
+        return [], [], [], 0
 
-    df = pd.read_csv(attendance_file)
-    names = df['Name']
-    rolls = df['Roll']
-    times = df['Time']
-    l = len(df)
-    return names, rolls, times, l
+    try:
+        df = pd.read_csv(attendance_file)
+        names = df['Name'].tolist()
+        rolls = df['Roll'].tolist()
+        times = df['Time'].tolist()
+        l = len(df)
+        return names, rolls, times, l
+    except Exception as e:
+        logging.error(f"Error reading attendance CSV: {e}")
+        return [], [], [], 0
 
 
 # Add Attendance of a specific user
@@ -164,14 +176,33 @@ def add_attendance(name):
     userid = name.split('_')[1]
     current_time = datetime.now().strftime("%H:%M:%S")
 
-    attendance_file = f'Attendance/Attendance-{datetoday}.csv'
-    with open(attendance_file, 'a') as f:
-        f.write(f'\n{username},{userid},{current_time}')
+    attendance_file = local('Attendance', f'Attendance-{datetoday}.csv')
+
+    # Read existing valid attendance records
+    existing_records = []
+    if os.path.isfile(attendance_file):
+        try:
+            df = pd.read_csv(attendance_file)
+            existing_records = df.to_dict('records')
+        except:
+            # If reading fails, start fresh
+            existing_records = []
+
+    # Add new record
+    existing_records.append({
+        'Name': username,
+        'Roll': int(userid),
+        'Time': current_time
+    })
+
+    # Write back to CSV
+    df = pd.DataFrame(existing_records)
+    df.to_csv(attendance_file, index=False)
 
 
 # A function to get names and rol numbers of all users
 def getallusers():
-    userlist = os.listdir('static/faces')
+    userlist = os.listdir(local('static', 'faces'))
     names = []
     rolls = []
     l = len(userlist)
@@ -212,11 +243,13 @@ def listusers():
 @app.route('/deleteuser', methods=['GET'])
 def deleteuser():
     duser = request.args.get('user')
-    deletefolder('static/faces/'+duser)
+    deletefolder(local('static', 'faces', duser))
 
     # if all the face are deleted, delete the trained file...
-    if os.listdir('static/faces/') == []:
-        os.remove('static/face_recognition_model.pkl')
+    if os.listdir(local('static', 'faces')) == []:
+        model_file = local('static', 'face_recognition_model.pkl')
+        if os.path.isfile(model_file):
+            os.remove(model_file)
 
     try:
         train_model()
@@ -241,13 +274,15 @@ def start():
         return render_template('home.html', names=names, rolls=rolls, times=times, l=l, totalreg=totalreg(), datetoday2=datetoday2, mess='There is no trained model in the static folder. Please add a new face to continue.')
 
     # Pre-load attendance to avoid CSV reading in loop
-    attendance_file = f'Attendance/Attendance-{datetoday}.csv'
-    if not os.path.isfile(attendance_file) or os.stat(attendance_file).st_size == 0:
-        with open(attendance_file, 'w') as f:
-            f.write('Name,Roll,Time')
-
-    df = pd.read_csv(attendance_file)
-    already_marked = set(df['Roll'].astype(int))
+    attendance_file = local('Attendance', f'Attendance-{datetoday}.csv')
+    already_marked = set()
+    if os.path.isfile(attendance_file) and os.stat(attendance_file).st_size > 0:
+        try:
+            df = pd.read_csv(attendance_file)
+            already_marked = set(df['Roll'].tolist())
+        except Exception as e:
+            logging.error(
+                f"Error reading attendance for already marked check: {e}")
 
     cap = cv2.VideoCapture(0)
     logging.info("Attendance tracking started.")
@@ -347,7 +382,7 @@ def start():
 def add():
     newusername = request.form['newusername']
     newuserid = request.form['newuserid']
-    userimagefolder = 'static/faces/'+newusername+'_'+str(newuserid)
+    userimagefolder = local('static', 'faces', newusername+'_'+str(newuserid))
     if not os.path.isdir(userimagefolder):
         os.makedirs(userimagefolder)
     i, j = 0, 0
